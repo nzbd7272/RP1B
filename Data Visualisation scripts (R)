@@ -1,0 +1,67 @@
+# Normalized Mutation Rates
+
+# 1. Load libraries
+library(ggplot2)
+
+# 2. Read and Clean (Same as before)
+file_path <- ""
+mutation_data <- read.csv(file_path, skip = 5)
+mutation_data <- subset(mutation_data, Mutation_Type != "")
+mutation_data$Normalized_Rate_per_100 <- as.numeric(mutation_data$Normalized_Rate_per_100)
+
+# --- NEW LOGIC STARTS HERE ---
+
+# 3. Extract the first letter of each mutation (A, C, G, or T)
+# This ignores whether you used ">", "->", or spaces.
+mutation_data$First_Base <- substr(trimws(mutation_data$Mutation_Type), 1, 1)
+
+# 4. Define the Pastel2 Palette mapping
+# 1=Green (A), 2=Orange (C), 3=Purple (G), 4=Pink (T)
+base_colors <- c(
+  "A" = "#B3E2CD", 
+  "C" = "#FDCDAC", 
+  "G" = "#CBD5E8", 
+  "T" = "#F4CAE4"
+)
+
+# 5. Create the plot using 'First_Base' for the fill color
+ggplot(mutation_data, aes(x = Mutation_Type, y = Normalized_Rate_per_100, fill = First_Base)) +
+  geom_col(color = "white", lwd = 0.2) + 
+  scale_fill_manual(values = base_colors) +
+  theme_minimal() +
+  labs(title = "Normalized Mutation Rates -  Dataset",
+       subtitle = "Colors grouped by First Base (Pastel2)",
+       x = "Mutation Type",
+       y = "Normalized Rate per 100 Bases") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+
+# Trinucleotide Mutation Profile
+
+# 1. Load the library
+ if (!require("ggplot2")) install.packages("ggplot2")
+ library(ggplot2)
+ > # 2. Define the file path
+ file_path <- ""
+ > # 3. Read the data
+ tri_data <- read.csv(file_path)
+ > # 4. Create a clean mutation label
+ tri_data$Mutation_Label <- paste0(tri_data$Ref_Base, " \u2192 ", tri_data$Alt_Base)
+ > # 5. Create the Histogram with independent Y-axes and Pastel Colors
+ ggplot(tri_data, aes(x = Context, y = Normalized_Rate_per_100, fill = Ref_Base)) +
+     geom_col() + 
+     # Changing scales to "free" allows both X and Y axes to adjust for each box
+     facet_wrap(~Mutation_Label, scales = "free") + 
+     scale_fill_brewer(palette = "Pastel2") + 
+     theme_minimal() +
+     labs(title = "Trinucleotide Mutation Profile: ",
+          subtitle = "Normalized rates",
+          x = "Trinucleotide Context (5' to 3')",
+          y = "Normalized Rate per 100 Bases") +
+     theme(
+         axis.text.x = element_text(angle = 90, vjust = 0.5, size = 7),
+         strip.background = element_rect(fill = "gray95", color = NA),
+         strip.text = element_text(face = "bold"),
+         legend.position = "none",
+         panel.grid.minor = element_blank()
