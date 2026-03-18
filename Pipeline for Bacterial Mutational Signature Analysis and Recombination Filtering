@@ -1,0 +1,170 @@
+import csv
+
+def load_reference_genome(fasta_path):
+    """Parses a FASTA file and returns {contig_name: full_sequence_string}."""
+    ref_genome = {}
+    current_contig = None
+    seq_fragments = []
+    
+    print(f"Loading reference: {fasta_path}")
+    with open(fasta_path, 'r') as fasta_file:
+        for line in fasta_file:
+            line = line.strip()
+            if not line: continue
+            if line.startswith(">"):
+                if current_contig:
+                    ref_genome[current_contig] = "".join(seq_fragments)
+                current_contig = line[1:].split()[0]
+                seq_fragments = []
+            else:
+                seq_fragments.append(line.upper())
+        if current_contig:
+            ref_genome[current_contig] = "".join(seq_fragments)
+    return ref_genome
+
+def get_genomic_background_counts(ref_genome):
+    """Counts every occurrence of single bases and trinucleotides in the genome."""
+    print("Calculating genomic background frequencies...")
+    trinuc_counts = {}
+    single_base_counts = {'A': 0, 'C': 0, 'G': 0, 'T': 0}
+    
+    for contig in ref_genome:
+        seq = ref_genome[contig]
+        # Count single bases
+        for base in 'ACGT':
+            single_base_counts[base] += seq.count(base)
+            
+        # Count trinucleotides using a sliding window
+        for i in range(len(seq) - 2):
+            trinuc = seq[i:i+3]
+            if 'N' not in trinuc:
+                trinuc_counts[trinuc] = trinuc_counts.get(trinuc, 0) + 1
+                
+    return trinuc_counts, single_base_counts
+
+def analyze_and_export_normalized(vcf_path, fasta_path, window_size=2000, min_snps=3):
+    """Main analysis pipeline with normalization and CSV layout."""
+    ref_genome = load_reference_genome(fasta_path)
+    genomic_trinucs, genomic_singles = get_genomic_background_counts(ref_genome)
+    
+    potential_singletons = {}
+    sample_to_positions = {} 
+    samples_list = []
+    
+    metrics = {
+        'total_snps_parsed': 0,
+        'recombination_snps_count': 0,
+        'final_singletons_count': 0,
+        'base_changes': {} 
+    }
+    
+    print("Step 1: Parsing VCF for singletons...")
+    with open(vcf_path, 'r') as vcf_file:
+        for line in vcf_file:
+            if line.startswith("##"): continue
+            if line.startswith("#CHROM"):
+                samples_list = line.strip().split('\t')[9:]
+                sample_to_positions = {sample: {} for sample in samples_list}
+                continue
+            if not samples_list: continue
+
+            columns = line.strip().split('\t')
+            if len(columns) < 10: continue
+
+            chrom, pos = columns[0], int(columns[1])
+            ref_base, alt_alleles = columns[3], columns[4]
+            filter_status = columns[6]
+
+            metrics['total_snps_parsed'] += 1
+            if ',' in alt_alleles or filter_status != 'PASS': continue
+            
+            alt_base = alt_alleles
+            genotype_calls = [g.split(':')[0] for g in columns[9:]]
+            int_genotypes = [int(g) if g.isdigit() else -1 for g in genotype_calls]
+            
+            allele_count = sum(g for g in int_genotypes if g == 1)
+            target_sample_idx = -1
+            if allele_count == 1:
+                target_sample_idx = int_genotypes.index(1)
+            elif allele_count == len(samples_list):
+                target_sample_idx = 0 
+
+            if target_sample_idx != -1 and target_sample_idx < len(samples_list):
+                sample_owner = samples_list[target_sample_idx]
+                potential_singletons[(chrom, pos)] = (ref_base, alt_base)
+                sample_to_positions[sample_owner].setdefault(chrom, []).append(pos)
+
+    print("Step 2: Identifying recombination clusters...")
+    recomb_filtered_sites = set()
+    for sample in sample_to_positions:
+        for contig in sample_to_positions[sample]:
+            positions = sorted(sample_to_positions[sample][contig])
+            idx = 0
+            while idx < len(positions):
+                window_start_idx = idx
+                max_window_coord = positions[window_start_idx] + window_size
+                while idx < len(positions) and positions[idx] <= max_window_coord:
+                    idx += 1
+                if (idx - window_start_idx) >= min_snps:
+                    for cluster_idx in range(window_start_idx, idx):
+                        recomb_filtered_sites.add((contig, positions[cluster_idx]))
+                else:
+                    idx = window_start_idx + 1
+    
+    metrics['recombination_snps_count'] = len(recomb_filtered_sites)
+
+    print("Step 3: Calculating Mutation counts...")
+    mutation_raw_counts = {} 
+
+    for (contig, pos), (ref, alt) in potential_singletons.items():
+        if (contig, pos) in recomb_filtered_sites: continue
+        
+        if contig in ref_genome:
+            genome_seq = ref_genome[contig]
+            seq_idx = pos - 1 
+            if 0 < seq_idx < len(genome_seq) - 1:
+                trinuc_context = genome_seq[seq_idx-1 : seq_idx+2]
+                if 'N' not in trinuc_context and trinuc_context[1] == ref:
+                    metrics['final_singletons_count'] += 1
+                    change_key = f"{ref}->{alt}"
+                    metrics['base_changes'][change_key] = metrics['base_changes'].get(change_key, 0) + 1
+                    matrix_key = (trinuc_context, alt)
+                    mutation_raw_counts[matrix_key] = mutation_raw_counts.get(matrix_key, 0) + 1
+
+    # --- EXPORTING ---
+
+    # File 1: Mutation Summary with separate Normalized Column
+    with open('mutation_summary_stats_normalized.csv', 'w', newline='') as csv_out:
+        writer = csv.writer(csv_out)
+        writer.writerow(['Category', 'Value', 'Reference_Base', 'Normalized_Rate_per_100'])
+        writer.writerow(['Total SNPs Parsed', metrics['total_snps_parsed'], 'N/A', 'N/A'])
+        writer.writerow(['Recombination SNPs Filtered', metrics['recombination_snps_count'], 'N/A', 'N/A'])
+        writer.writerow(['Clean Singletons Used', metrics['final_singletons_count'], 'N/A', 'N/A'])
+        writer.writerow([])
+        writer.writerow(['Mutation_Type', 'Raw_Count', 'Genomic_Ref_Base_Count', 'Normalized_Rate_per_100'])
+        
+        for change, raw_count in sorted(metrics['base_changes'].items()):
+            ref_base = change.split('->')[0]
+            genomic_ref_freq = genomic_singles.get(ref_base, 1)
+            norm_summary_rate = (raw_count / genomic_ref_freq) * 100
+            writer.writerow([change, raw_count, genomic_ref_freq, f"{norm_summary_rate:.8f}"])
+
+    # File 2: Trinucleotide Matrix with separate Normalized Column
+    with open('trinucleotide_bias_matrix_normalized.csv', 'w', newline='') as csv_out:
+        writer = csv.writer(csv_out)
+        writer.writerow(['Context', 'Ref_Base', 'Alt_Base', 'Full_Notation', 'Raw_Count', 'Genomic_Context_Count', 'Normalized_Rate_per_100'])
+        
+        for (context, alt), raw_count in sorted(mutation_raw_counts.items()):
+            notation = f"{context[0]}[{context[1]}>{alt}]{context[2]}"
+            genomic_ref_count = genomic_trinucs.get(context, 1)
+            normalized_rate = (raw_count / genomic_ref_count) * 100
+            writer.writerow([context, context[1], alt, notation, raw_count, genomic_ref_count, f"{normalized_rate:.8f}"])
+
+    return metrics
+
+if __name__ == "__main__":
+    VCF_INPUT = ''
+    FASTA_REF = ''
+
+    analyze_and_export_normalized(VCF_INPUT, FASTA_REF)
+    print("\nSuccess! Results exported with separate normalization columns.")
